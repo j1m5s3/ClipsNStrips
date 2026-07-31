@@ -32,6 +32,9 @@ class Pipeline:
         manifest = self.store.load(job_id)
         manifest.require_approval("ingest")
         source = self._source(manifest)
+        probe = self.ffmpeg.probe(source)
+        raw_duration = probe.get("format", {}).get("duration")
+        media_duration = float(raw_duration) if raw_duration is not None else None
         analysis_dir = self.store.directory(job_id) / "analysis"
         audio = analysis_dir / "audio.wav"
         transcript_path = analysis_dir / "transcript.json"
@@ -62,6 +65,7 @@ class Pipeline:
             media=source,
             min_seconds=min_seconds,
             max_seconds=max_seconds,
+            media_duration=media_duration,
         )
         segments_path = self.store.write_json(
             job_id,

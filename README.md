@@ -126,6 +126,18 @@ uv run clipsnstrips approve JOB_ID ingest REVIEWER "Written permission at CONTRA
 uv run clipsnstrips download-youtube JOB_ID "https://www.youtube.com/watch?v=..."
 ```
 
+For a guided single-URL workflow, pass the YouTube URL directly:
+
+```powershell
+uv run clipsnstrips process-youtube "https://www.youtube.com/watch?v=VIDEO_ID" `
+  --reviewer "Your Name" --vertical
+```
+
+The command fetches metadata and risk reasons, then pauses for an authorization attestation
+before downloading. It pauses again for manual segment selection and contextual review before
+rendering. Add `--art` to generate paid AI artwork. Upload and publication remain separate
+approval-gated commands.
+
 Analyze, inspect the returned candidates, select IDs, and approve the selection:
 
 ```powershell

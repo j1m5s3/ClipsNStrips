@@ -50,6 +50,7 @@ class GeminiHighlightAnalyzer:
         min_seconds: float = 15,
         max_seconds: float = 60,
         max_segments: int = 5,
+        media_duration: float | None = None,
     ) -> list[Segment]:
         logger.info(
             "Starting Gemini highlight analysis model=%s max_segments=%d",
@@ -58,7 +59,14 @@ class GeminiHighlightAnalyzer:
         )
         prompt = (
             f"Propose at most {max_segments} highlights, each between {min_seconds} and "
-            f"{max_seconds} seconds.\n\nTRANSCRIPT:\n{transcript.text}"
+            f"{max_seconds} seconds."
+            + (
+                f" All timestamps must be within the source duration of "
+                f"{media_duration:.3f} seconds."
+                if media_duration is not None
+                else ""
+            )
+            + f"\n\nTRANSCRIPT:\n{transcript.text}"
         )
         contents: list[object] = [prompt]
         uploaded = None
@@ -92,6 +100,7 @@ class GeminiHighlightAnalyzer:
             [Segment.model_validate(item.model_dump()) for item in payload.segments],
             min_seconds=min_seconds,
             max_seconds=max_seconds,
+            media_duration=media_duration,
         )
         logger.info("Completed Gemini highlight analysis candidate_count=%d", len(segments))
         return segments
@@ -116,12 +125,15 @@ def validate_segments(
     *,
     min_seconds: float,
     max_seconds: float,
+    media_duration: float | None = None,
 ) -> list[Segment]:
     accepted: list[Segment] = []
     for segment in sorted(segments, key=lambda item: item.start):
         if segment.start < 0 or segment.end <= segment.start:
             continue
         if not min_seconds <= segment.duration <= max_seconds:
+            continue
+        if media_duration is not None and segment.end > media_duration:
             continue
         if any(segment.start < prior.end and segment.end > prior.start for prior in accepted):
             continue

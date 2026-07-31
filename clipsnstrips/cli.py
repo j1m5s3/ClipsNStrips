@@ -25,6 +25,7 @@ from clipsnstrips.review import record_approval, set_segment_approval
 from clipsnstrips.youtube.discovery import YouTubeDiscovery
 from clipsnstrips.youtube.oauth import youtube_credentials
 from clipsnstrips.youtube.upload import YouTubeUploader
+from clipsnstrips.youtube.urls import video_id_from_url
 
 app = typer.Typer(no_args_is_help=True, help="Build reviewed clips from authorized media.")
 logger = logging.getLogger(__name__)
@@ -95,6 +96,133 @@ def create_local(title: str = "Local media") -> None:
         )
     )
     typer.echo(manifest.id)
+
+
+@app.command("process-youtube")
+def process_youtube(
+    url: str,
+    reviewer: str | None = None,
+    vertical: bool = True,
+    art: bool = False,
+) -> None:
+    """Interactively review and process one authorized YouTube URL."""
+    settings, store = context()
+    video_id = video_id_from_url(url)
+    logger.info("Starting interactive YouTube workflow video_id=%s", video_id)
+    discovery = YouTubeDiscovery(
+        settings.require("youtube_api_key"),
+        settings.owned_channel_ids,
+    )
+    candidate = discovery.by_id(video_id)
+    manifest = store.create(JobManifest(source=candidate, rights_state=candidate.rights_state))
+    store.write_json(
+        manifest.id,
+        "source/youtube_metadata.json",
+        candidate.model_dump(mode="json"),
+    )
+    print_json(
+        {
+            "job_id": manifest.id,
+            "video_id": candidate.video_id,
+            "title": candidate.title,
+            "channel": candidate.channel_title,
+            "license": candidate.license,
+            "risk_score": candidate.risk_score,
+            "risk_reasons": candidate.risk_reasons,
+        }
+    )
+
+    typer.confirm(
+        "Do you attest that YouTube and the applicable rights holders authorize "
+        "downloading and processing this video?",
+        default=False,
+        abort=True,
+    )
+    reviewer_name = reviewer or typer.prompt("Reviewer name")
+    authorization_notes = typer.prompt("Authorization basis and evidence")
+    manifest = store.load(manifest.id)
+    manifest.rights_evidence.append(
+        RightsEvidence(
+            kind="authorization_attestation",
+            value="authorized_for_download_and_processing",
+            source=f"https://www.youtube.com/watch?v={video_id}",
+        )
+    )
+    store.save(manifest)
+    record_approval(
+        store,
+        manifest.id,
+        purpose="ingest",
+        reviewer=reviewer_name,
+        approved=True,
+        notes=authorization_notes,
+    )
+    download_youtube(store, store.load(manifest.id), url)
+
+    pipeline = Pipeline(
+        store,
+        FFmpeg(settings.ffmpeg_binary, settings.ffprobe_binary),
+    )
+    pipeline.analyze(
+        manifest.id,
+        AssemblyAITranscriber(settings.require("assemblyai_api_key")),
+        GeminiHighlightAnalyzer(
+            settings.require("gemini_api_key"),
+            model=settings.gemini_model,
+        ),
+        min_seconds=settings.min_clip_seconds,
+        max_seconds=settings.max_clip_seconds,
+    )
+    analyzed = store.load(manifest.id)
+    print_json([segment.model_dump(mode="json") for segment in analyzed.segments])
+    if not analyzed.segments:
+        raise RuntimeError("Analysis returned no valid candidate segments")
+
+    selection = typer.prompt("Comma-separated segment IDs to render")
+    selected_ids = {
+        value.strip() for value in selection.replace(" ", ",").split(",") if value.strip()
+    }
+    if not selected_ids:
+        raise typer.BadParameter("Select at least one segment")
+    set_segment_approval(store, manifest.id, selected_ids)
+    typer.confirm(
+        "Have you reviewed the selected spans in their original context?",
+        default=False,
+        abort=True,
+    )
+    record_approval(
+        store,
+        manifest.id,
+        purpose="spans",
+        reviewer=reviewer_name,
+        approved=True,
+        notes="Selected spans reviewed interactively in original source context",
+    )
+
+    clips = pipeline.render_clips(
+        manifest.id,
+        RenderOptions(vertical=vertical),
+    )
+    illustrated: list[Path] = []
+    if art:
+        typer.confirm(
+            "Generate paid AI artwork for the selected spans?",
+            default=False,
+            abort=True,
+        )
+        illustrated = pipeline.render_art(
+            manifest.id,
+            OpenAIImageProvider(settings.require("openai_api_key")),
+            style="cinematic editorial comic, clean ink, rich color, no text",
+        )
+    logger.info("Completed interactive YouTube workflow job_id=%s", manifest.id)
+    print_json(
+        {
+            "job_id": manifest.id,
+            "clips": [str(path) for path in clips],
+            "illustrated_videos": [str(path) for path in illustrated],
+        }
+    )
 
 
 @app.command()

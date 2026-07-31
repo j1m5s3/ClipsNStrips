@@ -20,9 +20,11 @@ def test_segment_validation_rejects_duration_and_overlap() -> None:
             segment(10, 35),
             segment(40, 45),
             segment(50, 80),
+            segment(90, 120),
         ],
         min_seconds=15,
         max_seconds=60,
+        media_duration=100,
     )
     assert [(item.start, item.end) for item in result] == [(0, 20), (50, 80)]
 
