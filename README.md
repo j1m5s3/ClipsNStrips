@@ -51,6 +51,46 @@ and must not be committed.
 YouTube API requests consume project quota. New or unverified API projects may be restricted
 to private uploads until Google completes its required audit.
 
+## Run scripts
+
+PowerShell:
+
+```powershell
+.\scripts\setup.ps1
+.\scripts\run.ps1 --help
+.\scripts\run.ps1 discover --limit 5
+.\scripts\test.ps1
+```
+
+Bash:
+
+```bash
+bash scripts/setup.sh
+bash scripts/run.sh --help
+bash scripts/run.sh discover --limit 5
+bash scripts/test.sh
+```
+
+The launchers forward every argument to the ClipsNStrips CLI. They prefer `uv` and fall
+back to the repository virtual environment when `uv` is not on `PATH`. On Unix-like systems,
+you can optionally make the Bash scripts executable with `chmod +x scripts/*.sh`.
+
+## Logging
+
+Commands log to the console and to a rotating UTF-8 log file. The default location is
+`OUTPUT_DIR/logs/clipsnstrips.log`. Override it in `.env`:
+
+```dotenv
+LOG_DIR=output/logs
+LOG_LEVEL=INFO
+LOG_FILENAME=clipsnstrips.log
+LOG_MAX_BYTES=10485760
+LOG_BACKUP_COUNT=5
+```
+
+Set `LOG_LEVEL=DEBUG` for FFmpeg command details and job persistence events. API keys,
+OAuth tokens, full transcripts, and AI prompts are not written to logs.
+
 ## Workflow
 
 Discover without writing job folders:
@@ -58,6 +98,11 @@ Discover without writing job folders:
 ```powershell
 uv run clipsnstrips discover --limit 10
 ```
+
+`YOUTUBE_CATEGORY` and `--category` accept either a numeric API ID or a
+case-insensitive name from
+[`clipsnstrips/youtube/youtube_categories.json`](clipsnstrips/youtube/youtube_categories.json),
+for example `Comedy` or `23`.
 
 Create persistent jobs by adding `--no-dry-run`, or create one for a local source:
 

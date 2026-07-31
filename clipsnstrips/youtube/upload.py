@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,8 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
 from clipsnstrips.models import JobManifest, Stage, UploadRecord
+
+logger = logging.getLogger(__name__)
 
 
 class YouTubeUploader:
@@ -26,6 +29,11 @@ class YouTubeUploader:
         category_id: str = "22",
         contains_synthetic_media: bool = True,
     ) -> UploadRecord:
+        logger.info(
+            "Starting private YouTube upload job_id=%s artifact=%s",
+            manifest.id,
+            artifact,
+        )
         manifest.require_approval("rights")
         manifest.require_approval("output")
         if not artifact.exists():
@@ -60,7 +68,13 @@ class YouTubeUploader:
         )
         response = None
         while response is None:
-            _, response = request.next_chunk()
+            status, response = request.next_chunk()
+            if status:
+                logger.info(
+                    "YouTube upload progress job_id=%s progress=%.1f%%",
+                    manifest.id,
+                    status.progress() * 100,
+                )
 
         record = UploadRecord(
             video_id=response["id"],
@@ -69,9 +83,15 @@ class YouTubeUploader:
         )
         manifest.uploads.append(record)
         manifest.stage = Stage.UPLOADED_PRIVATE
+        logger.info(
+            "Completed private YouTube upload job_id=%s video_id=%s",
+            manifest.id,
+            record.video_id,
+        )
         return record
 
     def publish(self, manifest: JobManifest, video_id: str) -> None:
+        logger.info("Starting YouTube publish job_id=%s video_id=%s", manifest.id, video_id)
         manifest.require_approval("publish")
         if not any(item.video_id == video_id for item in manifest.uploads):
             raise PermissionError("Video was not uploaded by this job")
@@ -83,3 +103,4 @@ class YouTubeUploader:
             if item.video_id == video_id:
                 item.privacy_status = "public"
         manifest.stage = Stage.PUBLISHED
+        logger.info("Completed YouTube publish job_id=%s video_id=%s", manifest.id, video_id)

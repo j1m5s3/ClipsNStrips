@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from pathlib import Path
 
 from clipsnstrips.models import JobManifest, utc_now
+
+logger = logging.getLogger(__name__)
 
 
 class JobStore:
@@ -23,12 +26,15 @@ class JobStore:
         for name in ("source", "analysis", "clips", "art", "logs", "uploads"):
             (directory / name).mkdir(parents=True, exist_ok=True)
         self.save(manifest)
+        logger.info("Created job job_id=%s directory=%s", manifest.id, directory)
         return manifest
 
     def load(self, job_id: str) -> JobManifest:
-        return JobManifest.model_validate_json(
+        manifest = JobManifest.model_validate_json(
             self.manifest_path(job_id).read_text(encoding="utf-8")
         )
+        logger.debug("Loaded job job_id=%s stage=%s", job_id, manifest.stage)
+        return manifest
 
     def save(self, manifest: JobManifest) -> None:
         manifest.updated_at = utc_now()
@@ -40,15 +46,18 @@ class JobStore:
             encoding="utf-8",
         )
         temporary.replace(path)
+        logger.debug("Saved job job_id=%s stage=%s", manifest.id, manifest.stage)
 
     def write_json(self, job_id: str, relative_path: str, value: object) -> Path:
         path = self.directory(job_id) / relative_path
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(value, indent=2, default=str), encoding="utf-8")
+        logger.debug("Wrote job JSON job_id=%s path=%s", job_id, relative_path)
         return path
 
 
 def sha256_file(path: Path) -> str:
+    logger.debug("Calculating checksum path=%s", path)
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         while chunk := handle.read(1024 * 1024):

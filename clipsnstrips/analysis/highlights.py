@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
 from contextlib import suppress
 from pathlib import Path
 
 from google import genai
 from google.genai import types
+from pydantic import BaseModel, Field
 
-from clipsnstrips.models import Segment, Transcript
+from clipsnstrips.models import Segment, Transcript, VisualBeat
+
+logger = logging.getLogger(__name__)
 
 SYSTEM_INSTRUCTION = """You are an expert short-form video editor.
 Return only JSON with a top-level `segments` array. Each segment must contain:
@@ -17,8 +22,23 @@ Choose self-contained, truthful spans with enough context. Avoid unsafe, private
 defamatory, sexually explicit, or misleading excerpts. Do not decide copyright or fair use."""
 
 
+class HighlightProposal(BaseModel):
+    start: float
+    end: float
+    hook: str
+    context: str = ""
+    rationale: str = ""
+    confidence: float = Field(ge=0, le=1)
+    safety_notes: list[str] = Field(default_factory=list)
+    visual_beats: list[VisualBeat] = Field(default_factory=list)
+
+
+class HighlightResponse(BaseModel):
+    segments: list[HighlightProposal]
+
+
 class GeminiHighlightAnalyzer:
-    def __init__(self, api_key: str, model: str = "gemini-2.5-flash") -> None:
+    def __init__(self, api_key: str, model: str = "gemini-3.6-flash") -> None:
         self.client = genai.Client(api_key=api_key)
         self.model = model
 
@@ -31,6 +51,11 @@ class GeminiHighlightAnalyzer:
         max_seconds: float = 60,
         max_segments: int = 5,
     ) -> list[Segment]:
+        logger.info(
+            "Starting Gemini highlight analysis model=%s max_segments=%d",
+            self.model,
+            max_segments,
+        )
         prompt = (
             f"Propose at most {max_segments} highlights, each between {min_seconds} and "
             f"{max_seconds} seconds.\n\nTRANSCRIPT:\n{transcript.text}"
@@ -38,7 +63,9 @@ class GeminiHighlightAnalyzer:
         contents: list[object] = [prompt]
         uploaded = None
         if media:
+            logger.info("Uploading media for Gemini analysis path=%s", media)
             uploaded = self.client.files.upload(file=str(media))
+            uploaded = self._wait_until_active(uploaded.name)
             contents.insert(0, uploaded)
         try:
             response = self.client.models.generate_content(
@@ -47,20 +74,41 @@ class GeminiHighlightAnalyzer:
                 config=types.GenerateContentConfig(
                     system_instruction=SYSTEM_INSTRUCTION,
                     response_mime_type="application/json",
+                    response_schema=HighlightResponse,
                     temperature=0.2,
                 ),
             )
-            payload = json.loads(response.text or "{}")
+            parsed = response.parsed
+            payload = (
+                parsed
+                if isinstance(parsed, HighlightResponse)
+                else HighlightResponse.model_validate(json.loads(response.text or "{}"))
+            )
         finally:
             if uploaded:
                 with suppress(Exception):
                     self.client.files.delete(name=uploaded.name)
-        segments = [Segment.model_validate(item) for item in payload.get("segments", [])]
-        return validate_segments(
-            segments,
+        segments = validate_segments(
+            [Segment.model_validate(item.model_dump()) for item in payload.segments],
             min_seconds=min_seconds,
             max_seconds=max_seconds,
         )
+        logger.info("Completed Gemini highlight analysis candidate_count=%d", len(segments))
+        return segments
+
+    def _wait_until_active(self, name: str, timeout_seconds: float = 120) -> object:
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            uploaded = self.client.files.get(name=name)
+            state = getattr(uploaded.state, "name", str(uploaded.state)).upper()
+            logger.debug("Gemini file state file=%s state=%s", name, state)
+            if state == "ACTIVE":
+                return uploaded
+            if state == "FAILED":
+                raise RuntimeError(f"Gemini file processing failed for {name}")
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"Gemini file processing timed out for {name}")
+            time.sleep(2)
 
 
 def validate_segments(
@@ -78,4 +126,9 @@ def validate_segments(
         if any(segment.start < prior.end and segment.end > prior.start for prior in accepted):
             continue
         accepted.append(segment)
+    logger.debug(
+        "Validated highlight segments proposed=%d accepted=%d",
+        len(segments),
+        len(accepted),
+    )
     return accepted

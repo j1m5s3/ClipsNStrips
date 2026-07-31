@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import typer
@@ -11,6 +12,7 @@ from clipsnstrips.art.providers import OpenAIImageProvider
 from clipsnstrips.config import Settings
 from clipsnstrips.ingest.sources import download_youtube, ingest_local
 from clipsnstrips.jobs import JobStore
+from clipsnstrips.logging_config import configure_logging
 from clipsnstrips.media.ffmpeg import FFmpeg
 from clipsnstrips.models import (
     JobManifest,
@@ -25,10 +27,19 @@ from clipsnstrips.youtube.oauth import youtube_credentials
 from clipsnstrips.youtube.upload import YouTubeUploader
 
 app = typer.Typer(no_args_is_help=True, help="Build reviewed clips from authorized media.")
+logger = logging.getLogger(__name__)
 
 
 def context() -> tuple[Settings, JobStore]:
     settings = Settings()
+    configure_logging(
+        settings.effective_log_dir,
+        level=settings.log_level,
+        filename=settings.log_filename,
+        max_bytes=settings.log_max_bytes,
+        backup_count=settings.log_backup_count,
+    )
+    logger.debug("Application context initialized output_dir=%s", settings.output_dir)
     return settings, JobStore(settings.output_dir)
 
 
@@ -142,7 +153,10 @@ def analyze(job_id: str) -> None:
     pipeline.analyze(
         job_id,
         AssemblyAITranscriber(settings.require("assemblyai_api_key")),
-        GeminiHighlightAnalyzer(settings.require("gemini_api_key")),
+        GeminiHighlightAnalyzer(
+            settings.require("gemini_api_key"),
+            model=settings.gemini_model,
+        ),
         min_seconds=settings.min_clip_seconds,
         max_seconds=settings.max_clip_seconds,
     )

@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import logging
+
 from clipsnstrips.jobs import JobStore
 from clipsnstrips.models import Approval, RightsState, Stage
+
+logger = logging.getLogger(__name__)
 
 
 def record_approval(
@@ -37,6 +41,12 @@ def record_approval(
     elif purpose == "output" and approved:
         manifest.stage = Stage.OUTPUT_REVIEWED
     store.save(manifest)
+    logger.info(
+        "Recorded approval job_id=%s purpose=%s approved=%s",
+        job_id,
+        purpose,
+        approved,
+    )
 
 
 def set_segment_approval(
@@ -52,3 +62,8 @@ def set_segment_approval(
     for segment in manifest.segments:
         segment.approved = segment.id in segment_ids
     store.save(manifest)
+    logger.info(
+        "Updated segment selection job_id=%s selected_count=%d",
+        job_id,
+        len(segment_ids),
+    )

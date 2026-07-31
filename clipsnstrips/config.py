@@ -22,9 +22,15 @@ class Settings(BaseSettings):
     youtube_category: str | None = None
     assemblyai_api_key: str | None = None
     gemini_api_key: str | None = None
+    gemini_model: str = "gemini-3.6-flash"
     openai_api_key: str | None = None
     ffmpeg_binary: str = "ffmpeg"
     ffprobe_binary: str = "ffprobe"
+    log_dir: Path | None = None
+    log_level: str = "INFO"
+    log_filename: str = "clipsnstrips.log"
+    log_max_bytes: int = 10 * 1024 * 1024
+    log_backup_count: int = 5
     owned_channel_ids: set[str] = Field(default_factory=set)
     min_clip_seconds: float = 15
     max_clip_seconds: float = 60
@@ -34,3 +40,7 @@ class Settings(BaseSettings):
         if not value:
             raise RuntimeError(f"Missing required setting: {name.upper()}")
         return str(value)
+
+    @property
+    def effective_log_dir(self) -> Path:
+        return self.log_dir or self.output_dir / "logs"

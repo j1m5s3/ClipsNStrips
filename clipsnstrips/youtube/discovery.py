@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import json
+import logging
 from datetime import datetime
 from typing import Any
 
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 from clipsnstrips.models import VideoCandidate
 from clipsnstrips.rights import classify_candidate
+from clipsnstrips.youtube.categories import resolve_category
+
+logger = logging.getLogger(__name__)
 
 
 class YouTubeDiscovery:
@@ -21,26 +27,37 @@ class YouTubeDiscovery:
         category: str | None = None,
         limit: int = 25,
     ) -> list[VideoCandidate]:
+        category_id = resolve_category(category)
+        logger.info(
+            "Discovering popular YouTube videos region=%s category=%s category_id=%s limit=%d",
+            region,
+            category or "all",
+            category_id or "all",
+            limit,
+        )
         parameters: dict[str, Any] = {
             "part": "snippet,contentDetails,status,statistics",
             "chart": "mostPopular",
             "regionCode": region,
             "maxResults": min(max(limit, 1), 50),
         }
-        if category:
-            parameters["videoCategoryId"] = category
-        response = self.client.videos().list(**parameters).execute()
-        return [self._candidate(item) for item in response.get("items", [])]
+        if category_id:
+            parameters["videoCategoryId"] = category_id
+        response = self._execute(
+            self.client.videos().list(**parameters),
+            operation="popular video discovery",
+        )
+        candidates = [self._candidate(item) for item in response.get("items", [])]
+        logger.info("Completed YouTube discovery candidate_count=%d", len(candidates))
+        return candidates
 
     def by_id(self, video_id: str) -> VideoCandidate:
-        response = (
-            self.client.videos()
-            .list(
-                part="snippet,contentDetails,status,statistics",
-                id=video_id,
-            )
-            .execute()
+        logger.info("Fetching YouTube metadata video_id=%s", video_id)
+        request = self.client.videos().list(
+            part="snippet,contentDetails,status,statistics",
+            id=video_id,
         )
+        response = self._execute(request, operation="video metadata lookup")
         items = response.get("items", [])
         if not items:
             raise LookupError(f"YouTube video not found: {video_id}")
@@ -70,3 +87,23 @@ class YouTubeDiscovery:
             else None,
         )
         return classify_candidate(candidate, self.owned_channel_ids)
+
+    @staticmethod
+    def _execute(request: Any, *, operation: str) -> dict[str, Any]:
+        try:
+            return request.execute()
+        except HttpError as error:
+            status = getattr(error.resp, "status", "unknown")
+            message = "YouTube API request failed"
+            try:
+                payload = json.loads(error.content.decode("utf-8"))
+                message = payload.get("error", {}).get("message", message)
+            except AttributeError, UnicodeDecodeError, json.JSONDecodeError:
+                pass
+            logger.error(
+                "YouTube API operation failed operation=%s status=%s message=%s",
+                operation,
+                status,
+                message,
+            )
+            raise RuntimeError(f"YouTube API {operation} failed ({status}): {message}") from None

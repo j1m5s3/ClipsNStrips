@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
+
 from clipsnstrips.models import RightsState, VideoCandidate
 
 HIGH_RISK_CATEGORIES = {"10", "30"}  # Music, Movies
+logger = logging.getLogger(__name__)
 
 
 def classify_candidate(
@@ -45,4 +48,11 @@ def classify_candidate(
         candidate.rights_state = RightsState.NEEDS_REVIEW
     else:
         candidate.rights_state = RightsState.NEEDS_REVIEW
+    logger.info(
+        "Classified rights risk video_id=%s score=%d state=%s reason_count=%d",
+        candidate.video_id,
+        candidate.risk_score,
+        candidate.rights_state,
+        len(candidate.risk_reasons),
+    )
     return candidate

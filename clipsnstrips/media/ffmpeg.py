@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from pathlib import Path
 
 from clipsnstrips.models import RenderOptions, Segment
+
+logger = logging.getLogger(__name__)
 
 
 class FFmpeg:
@@ -13,10 +16,13 @@ class FFmpeg:
         self.ffprobe = ffprobe
 
     def check(self) -> None:
+        logger.info("Checking FFmpeg executables")
         self._run([self.ffmpeg, "-version"])
         self._run([self.ffprobe, "-version"])
+        logger.info("FFmpeg executables are available")
 
     def probe(self, source: Path) -> dict:
+        logger.info("Probing media source=%s", source)
         result = self._run(
             [
                 self.ffprobe,
@@ -32,6 +38,7 @@ class FFmpeg:
         return json.loads(result.stdout)
 
     def extract_audio(self, source: Path, destination: Path) -> Path:
+        logger.info("Extracting audio source=%s destination=%s", source, destination)
         destination.parent.mkdir(parents=True, exist_ok=True)
         self._run(
             [
@@ -58,6 +65,13 @@ class FFmpeg:
         segment: Segment,
         options: RenderOptions,
     ) -> Path:
+        logger.info(
+            "Rendering clip segment_id=%s start=%.3f end=%.3f destination=%s",
+            segment.id,
+            segment.start,
+            segment.end,
+            destination,
+        )
         destination.parent.mkdir(parents=True, exist_ok=True)
         filters = [f"loudnorm=I={options.audio_lufs}:TP=-1.5:LRA=11"]
         video_filters: list[str] = []
@@ -111,6 +125,12 @@ class FFmpeg:
     ) -> Path:
         if not images or len(images) != len(durations):
             raise ValueError("Each image requires a duration")
+        logger.info(
+            "Composing illustrated video image_count=%d duration=%.3f destination=%s",
+            len(images),
+            sum(durations),
+            destination,
+        )
         destination.parent.mkdir(parents=True, exist_ok=True)
         concat_file = destination.with_suffix(".concat.txt")
         lines: list[str] = []
@@ -158,8 +178,9 @@ class FFmpeg:
 
     @staticmethod
     def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        logger.debug("Running media command command=%s", subprocess.list2cmdline(command))
         try:
-            return subprocess.run(
+            result = subprocess.run(
                 command,
                 check=True,
                 capture_output=True,
@@ -167,7 +188,15 @@ class FFmpeg:
                 encoding="utf-8",
                 errors="replace",
             )
+            logger.debug("Media command completed executable=%s", command[0])
+            return result
         except FileNotFoundError as error:
+            logger.exception("Media executable not found executable=%s", command[0])
             raise RuntimeError(f"Required executable not found: {command[0]}") from error
         except subprocess.CalledProcessError as error:
+            logger.error(
+                "Media command failed executable=%s return_code=%s",
+                command[0],
+                error.returncode,
+            )
             raise RuntimeError(error.stderr.strip() or "FFmpeg command failed") from error

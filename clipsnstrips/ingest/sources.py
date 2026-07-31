@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 import shutil
 from pathlib import Path
 
 from clipsnstrips.jobs import JobStore, sha256_file
 from clipsnstrips.models import Artifact, JobManifest, Stage
+
+logger = logging.getLogger(__name__)
 
 
 def ingest_local(
@@ -12,6 +15,7 @@ def ingest_local(
     manifest: JobManifest,
     source: Path,
 ) -> Path:
+    logger.info("Starting local ingest job_id=%s source=%s", manifest.id, source)
     manifest.require_approval("ingest")
     if not source.is_file():
         raise FileNotFoundError(source)
@@ -27,6 +31,7 @@ def download_youtube(
     url: str,
 ) -> Path:
     """Download only after a reviewer records explicit ingest authorization."""
+    logger.info("Starting authorized YouTube download job_id=%s", manifest.id)
     manifest.require_approval("ingest")
     approval = manifest.approval_for("ingest")
     if not approval or not approval.notes.strip():
@@ -66,4 +71,10 @@ def _record_source(store: JobStore, manifest: JobManifest, source: Path) -> Path
     manifest.add_artifact(Artifact(kind="source", path=relative, checksum=checksum))
     manifest.stage = Stage.INGESTED
     store.save(manifest)
+    logger.info(
+        "Completed source ingest job_id=%s path=%s checksum=%s",
+        manifest.id,
+        relative,
+        checksum,
+    )
     return source

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from clipsnstrips.analysis.highlights import GeminiHighlightAnalyzer
@@ -9,6 +10,8 @@ from clipsnstrips.art.providers import ImageProvider
 from clipsnstrips.jobs import JobStore, sha256_file
 from clipsnstrips.media.ffmpeg import FFmpeg
 from clipsnstrips.models import Artifact, RenderOptions, Stage, Transcript
+
+logger = logging.getLogger(__name__)
 
 
 class Pipeline:
@@ -25,18 +28,35 @@ class Pipeline:
         min_seconds: float,
         max_seconds: float,
     ) -> None:
+        logger.info("Starting analysis job_id=%s", job_id)
         manifest = self.store.load(job_id)
         manifest.require_approval("ingest")
         source = self._source(manifest)
         analysis_dir = self.store.directory(job_id) / "analysis"
         audio = analysis_dir / "audio.wav"
-        self.ffmpeg.extract_audio(source, audio)
-        transcript = transcriber.transcribe(audio)
-        transcript_path = self.store.write_json(
-            job_id,
-            "analysis/transcript.json",
-            transcript.model_dump(mode="json"),
+        transcript_path = analysis_dir / "transcript.json"
+        if transcript_path.exists():
+            logger.info("Reusing transcript job_id=%s path=%s", job_id, transcript_path)
+            transcript = Transcript.model_validate_json(transcript_path.read_text(encoding="utf-8"))
+        else:
+            self.ffmpeg.extract_audio(source, audio)
+            transcript = transcriber.transcribe(audio)
+            transcript_path = self.store.write_json(
+                job_id,
+                "analysis/transcript.json",
+                transcript.model_dump(mode="json"),
+            )
+        manifest.transcript_path = transcript_path.relative_to(
+            self.store.directory(job_id)
+        ).as_posix()
+        manifest.add_artifact(
+            Artifact(
+                kind="transcript",
+                path=manifest.transcript_path,
+                checksum=sha256_file(transcript_path),
+            )
         )
+        self.store.save(manifest)
         segments = analyzer.propose(
             transcript,
             media=source,
@@ -48,17 +68,7 @@ class Pipeline:
             "analysis/candidate_segments.json",
             [segment.model_dump(mode="json") for segment in segments],
         )
-        manifest.transcript_path = transcript_path.relative_to(
-            self.store.directory(job_id)
-        ).as_posix()
         manifest.segments = segments
-        manifest.add_artifact(
-            Artifact(
-                kind="transcript",
-                path=manifest.transcript_path,
-                checksum=sha256_file(transcript_path),
-            )
-        )
         manifest.add_artifact(
             Artifact(
                 kind="candidate_segments",
@@ -68,12 +78,18 @@ class Pipeline:
         )
         manifest.stage = Stage.ANALYZED
         self.store.save(manifest)
+        logger.info(
+            "Completed analysis job_id=%s candidate_count=%d",
+            job_id,
+            len(segments),
+        )
 
     def render_clips(
         self,
         job_id: str,
         options: RenderOptions,
     ) -> list[Path]:
+        logger.info("Starting clip rendering job_id=%s vertical=%s", job_id, options.vertical)
         manifest = self.store.load(job_id)
         manifest.require_approval("spans")
         source = self._source(manifest)
@@ -93,8 +109,15 @@ class Pipeline:
                 )
             )
             outputs.append(destination)
+            logger.info(
+                "Rendered clip job_id=%s segment_id=%s path=%s",
+                job_id,
+                segment.id,
+                destination,
+            )
         manifest.stage = Stage.RENDERED
         self.store.save(manifest)
+        logger.info("Completed clip rendering job_id=%s output_count=%d", job_id, len(outputs))
         return outputs
 
     def render_art(
@@ -104,6 +127,7 @@ class Pipeline:
         *,
         style: str,
     ) -> list[Path]:
+        logger.info("Starting art rendering job_id=%s", job_id)
         manifest = self.store.load(job_id)
         manifest.require_approval("spans")
         source = self._source(manifest)
@@ -123,6 +147,12 @@ class Pipeline:
                 )
                 metadata.append(provider.generate(prompt, destination))
                 image_paths.append(destination)
+                logger.info(
+                    "Generated art panel job_id=%s segment_id=%s panel=%d",
+                    job_id,
+                    segment.id,
+                    prompt.index,
+                )
             self.store.write_json(
                 job_id,
                 f"art/{segment.id}/prompts.json",
@@ -148,8 +178,15 @@ class Pipeline:
                 )
             )
             outputs.append(video)
+            logger.info(
+                "Rendered illustrated video job_id=%s segment_id=%s path=%s",
+                job_id,
+                segment.id,
+                video,
+            )
         manifest.stage = Stage.RENDERED
         self.store.save(manifest)
+        logger.info("Completed art rendering job_id=%s output_count=%d", job_id, len(outputs))
         return outputs
 
     def transcript(self, job_id: str) -> Transcript:
