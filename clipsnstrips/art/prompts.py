@@ -15,7 +15,84 @@ class PanelPrompt(BaseModel):
     prompt: str
     safe_prompt: str = ""
     subject_ids: list[str] = Field(default_factory=list)
+    location_id: str | None = None
     reference_indices: list[int] = Field(default_factory=list)
+
+
+class ComicPagePrompt(PanelPrompt):
+    subpanels: list[PanelPrompt] = Field(default_factory=list)
+    location_ids: list[str] = Field(default_factory=list)
+
+
+def comic_page_prompts(
+    prompts: list[PanelPrompt],
+    *,
+    max_subpanels: int = 4,
+) -> list[ComicPagePrompt]:
+    if not 1 <= max_subpanels <= 4:
+        raise ValueError("max_subpanels must be between 1 and 4")
+    pages: list[ComicPagePrompt] = []
+    for offset in range(0, len(prompts), max_subpanels):
+        subpanels = prompts[offset : offset + max_subpanels]
+        page_index = len(pages) + 1
+        subject_ids = list(
+            dict.fromkeys(subject_id for panel in subpanels for subject_id in panel.subject_ids)
+        )
+        location_ids = list(
+            dict.fromkeys(panel.location_id for panel in subpanels if panel.location_id is not None)
+        )
+        reference_indices = list(
+            dict.fromkeys(
+                reference_index
+                for panel in subpanels
+                for reference_index in panel.reference_indices
+            )
+        )
+        event_instructions = "\n".join(
+            f"Cell {cell_index} ({_cell_name(cell_index)}): {panel.prompt}"
+            for cell_index, panel in enumerate(subpanels, start=1)
+        )
+        safe_instructions = "\n".join(
+            f"Cell {cell_index} ({_cell_name(cell_index)}): {panel.safe_prompt}"
+            for cell_index, panel in enumerate(subpanels, start=1)
+        )
+        layout = (
+            "Create one vertical 2:3 comic page with an exact 2x2 grid. "
+            "Use equal-sized cells separated by straight, clearly visible gutters. "
+            "Reading order is top-left, top-right, bottom-left, bottom-right. "
+            "Keep every scene entirely inside its assigned cell; do not let subjects, "
+            "objects, or backgrounds cross gutters. Do not add panel numbers, captions, "
+            "speech bubbles, logos, or watermarks. "
+        )
+        unused = 4 - len(subpanels)
+        unused_instruction = (
+            f"Leave the final {unused} unused grid cell{'s' if unused != 1 else ''} "
+            "as plain neutral paper with no people or objects. "
+            if unused
+            else ""
+        )
+        pages.append(
+            ComicPagePrompt(
+                index=page_index,
+                start=subpanels[0].start,
+                end=subpanels[-1].end,
+                prompt=f"{layout}{unused_instruction}\n{event_instructions}",
+                safe_prompt=(
+                    f"{layout}All depicted content must be benign, non-explicit, and "
+                    f"non-graphic. {unused_instruction}\n{safe_instructions}"
+                ),
+                subject_ids=subject_ids,
+                location_id=location_ids[0] if len(location_ids) == 1 else None,
+                location_ids=location_ids,
+                reference_indices=reference_indices,
+                subpanels=subpanels,
+            )
+        )
+    return pages
+
+
+def _cell_name(index: int) -> str:
+    return ("top-left", "top-right", "bottom-left", "bottom-right")[index - 1]
 
 
 def panel_prompts(
@@ -114,6 +191,7 @@ def panel_prompts(
                 start=start,
                 end=end,
                 subject_ids=subject_ids,
+                location_id=panel_context.location_id if panel_context else None,
                 reference_indices=panel_context.reference_indices if panel_context else [],
                 safe_prompt=(
                     f"{safe_style}. Create a benign editorial comic illustration. "

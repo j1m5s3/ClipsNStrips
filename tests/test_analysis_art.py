@@ -2,7 +2,12 @@ from clipsnstrips.analysis.highlights import (
     scaled_candidate_limit,
     validate_segments,
 )
-from clipsnstrips.art.prompts import panel_prompts, safe_panel_prompt
+from clipsnstrips.art.prompts import (
+    ComicPagePrompt,
+    comic_page_prompts,
+    panel_prompts,
+    safe_panel_prompt,
+)
 from clipsnstrips.models import Segment, Transcript, VisualBeat, Word
 
 
@@ -87,6 +92,41 @@ def test_panel_count_scales_with_segment_duration() -> None:
     long = panel_prompts(segment(0, 53), seconds_per_panel=8)
     assert len(short) == 3
     assert len(long) == 7
+
+
+def test_comic_pages_group_four_events_in_reading_order() -> None:
+    panels = panel_prompts(
+        segment(0, 40),
+        seconds_per_panel=5,
+        min_panels=8,
+        max_panels=8,
+    )
+    pages = comic_page_prompts(panels)
+
+    assert len(pages) == 2
+    assert all(isinstance(page, ComicPagePrompt) for page in pages)
+    assert [panel.index for panel in pages[0].subpanels] == [1, 2, 3, 4]
+    assert "Cell 1 (top-left)" in pages[0].prompt
+    assert "Cell 4 (bottom-right)" in pages[0].prompt
+    assert pages[0].start == panels[0].start
+    assert pages[1].end == panels[-1].end
+
+
+def test_comic_page_partial_grid_and_safe_prompt() -> None:
+    panels = panel_prompts(
+        segment(0, 15),
+        seconds_per_panel=5,
+        min_panels=3,
+        max_panels=3,
+    )
+    page = comic_page_prompts(panels)[0]
+    safe = safe_panel_prompt(page)
+
+    assert len(page.subpanels) == 3
+    assert "final 1 unused grid cell" in page.prompt
+    assert "exact 2x2 grid" in page.prompt
+    assert "benign" in safe.prompt
+    assert isinstance(safe, ComicPagePrompt)
 
 
 def test_candidate_count_scales_with_source_duration() -> None:

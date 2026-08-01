@@ -56,7 +56,16 @@ class JobStore:
     def create(self, manifest: JobManifest | None = None) -> JobManifest:
         manifest = manifest or JobManifest()
         directory = self.directory(manifest.id)
-        for name in ("source", "analysis", "clips", "art", "logs", "uploads"):
+        for name in (
+            "source",
+            "analysis",
+            "clips",
+            "art",
+            "narration",
+            "documents",
+            "logs",
+            "uploads",
+        ):
             (directory / name).mkdir(parents=True, exist_ok=True)
         self.save(manifest)
         logger.info("Created job job_id=%s directory=%s", manifest.id, directory)

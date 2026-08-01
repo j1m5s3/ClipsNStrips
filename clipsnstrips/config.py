@@ -34,6 +34,26 @@ class Settings(BaseSettings):
     )
     reference_frame_count: int = Field(default=6, ge=1, le=15)
     reference_frame_max_width: int = Field(default=1024, ge=256, le=2048)
+    elevenlabs_api_key: str | None = None
+    elevenlabs_model: str = "eleven_multilingual_v2"
+    elevenlabs_output_format: str = "mp3_44100_128"
+    elevenlabs_voice_ids: list[str] = Field(default_factory=list)
+    elevenlabs_stability: float = Field(default=0.55, ge=0, le=1)
+    elevenlabs_similarity_boost: float = Field(default=0.75, ge=0, le=1)
+    elevenlabs_style: float = Field(default=0.15, ge=0, le=1)
+    document_ocr_model: str = "gemini-3.6-flash"
+    document_front_matter_max_chars: int = Field(default=20_000, ge=1)
+    document_max_bytes: int = 100 * 1024 * 1024
+    document_max_pages: int = 500
+    document_ocr_min_chars: int = 40
+    document_target_section_words: int = 900
+    document_max_section_words: int = 1_400
+    document_words_per_panel: int = 90
+    document_min_panels: int = 1
+    document_max_panels: int = 24
+    narration_pause_seconds: float = 0.25
+    narration_audio_lufs: float = -16
+    document_max_narration_characters: int = 500_000
     ffmpeg_binary: str = "ffmpeg"
     ffprobe_binary: str = "ffprobe"
     log_dir: Path | None = None
@@ -50,6 +70,7 @@ class Settings(BaseSettings):
     art_seconds_per_panel: float = 8
     art_min_panels: int = 3
     art_max_panels: int = 12
+    art_subpanels_per_image: int = Field(default=4, ge=1, le=4)
 
     def require(self, name: str) -> str:
         value = getattr(self, name)

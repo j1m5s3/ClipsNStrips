@@ -19,6 +19,16 @@ class RightsState(StrEnum):
     APPROVED = "approved"
 
 
+class SourceKind(StrEnum):
+    VIDEO = "video"
+    DOCUMENT = "document"
+
+
+class ScriptMode(StrEnum):
+    FAITHFUL = "faithful"
+    ADAPTED = "adapted"
+
+
 class Stage(StrEnum):
     DISCOVERED = "discovered"
     INGEST_AUTHORIZED = "ingest_authorized"
@@ -79,6 +89,151 @@ class Transcript(BaseModel):
     provider_id: str | None = None
 
 
+class DocumentPage(BaseModel):
+    page_number: int
+    text: str
+    start_char: int = 0
+    end_char: int = 0
+    extraction_method: str = "embedded"
+    image_path: str | None = None
+    image_checksum: str | None = None
+
+
+class DocumentMetadata(BaseModel):
+    title: str
+    author: str = ""
+    format: str
+    page_count: int = 1
+    word_count: int = 0
+
+
+class ExtractedDocument(BaseModel):
+    source_checksum: str
+    extractor_key: str
+    metadata: DocumentMetadata
+    text: str
+    pages: list[DocumentPage] = Field(default_factory=list)
+
+
+class DocumentMetadataEvidence(BaseModel):
+    value: str
+    quote: str
+    start_char: int = Field(ge=0)
+    end_char: int = Field(ge=0)
+    confidence: float = Field(default=1, ge=0, le=1)
+
+
+class DocumentContentSelection(BaseModel):
+    requested_start_page: int = Field(ge=1)
+    content_start_char: int = Field(ge=0)
+    excluded_start_char: int = Field(default=0, ge=0)
+    excluded_end_char: int = Field(ge=0)
+    title: DocumentMetadataEvidence | None = None
+    author: DocumentMetadataEvidence | None = None
+    analyzer_key: str = "none"
+    warnings: list[str] = Field(default_factory=list)
+
+
+class DocumentSection(BaseModel):
+    id: str = Field(default_factory=lambda: uuid4().hex[:12])
+    index: int
+    title: str
+    text: str
+    start_char: int
+    end_char: int
+    page_start: int = 1
+    page_end: int = 1
+    summary: str = ""
+
+
+class StoryCharacter(BaseModel):
+    id: str
+    name: str
+    visual_description: str
+    clothing: str = ""
+    role: str = ""
+    relationships: list[str] = Field(default_factory=list)
+    voice_description: str = ""
+    uncertainty: list[str] = Field(default_factory=list)
+
+
+class StoryLocation(BaseModel):
+    id: str
+    name: str
+    description: str
+
+
+class StoryBible(BaseModel):
+    summary: str
+    era: str = ""
+    palette: str = ""
+    characters: list[StoryCharacter] = Field(default_factory=list)
+    locations: list[StoryLocation] = Field(default_factory=list)
+
+
+class VoiceAssignment(BaseModel):
+    character_id: str
+    voice_id: str
+    voice_name: str = ""
+    style: str = ""
+
+
+class VoiceBible(BaseModel):
+    provider: str
+    model: str
+    assignments: list[VoiceAssignment] = Field(default_factory=list)
+
+    def voice_for(self, character_id: str) -> VoiceAssignment:
+        assignment = next(
+            (item for item in self.assignments if item.character_id == character_id),
+            None,
+        )
+        if assignment is None:
+            assignment = next(
+                (item for item in self.assignments if item.character_id == "narrator"),
+                None,
+            )
+        if assignment is None:
+            raise LookupError(f"No voice assignment for {character_id}")
+        return assignment
+
+
+class NarrationLine(BaseModel):
+    index: int
+    section_id: str
+    character_id: str = "narrator"
+    text: str
+    source_start: int
+    source_end: int
+    adapted: bool = False
+    scene_description: str = ""
+
+
+class NarrationScript(BaseModel):
+    mode: ScriptMode
+    source_checksum: str
+    lines: list[NarrationLine] = Field(default_factory=list)
+
+
+class NarrationClip(BaseModel):
+    line_index: int
+    section_id: str
+    character_id: str
+    path: str
+    duration_ms: int
+    checksum: str
+    provider_id: str | None = None
+    alignment: list[Word] = Field(default_factory=list)
+
+
+class NarrationManifest(BaseModel):
+    provider_key: str
+    script_checksum: str
+    voice_bible_checksum: str
+    clips: list[NarrationClip] = Field(default_factory=list)
+    total_duration_ms: int = 0
+
+
 class VisualBeat(BaseModel):
     start: float
     end: float
@@ -122,6 +277,7 @@ class JobManifest(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
     stage: Stage = Stage.DISCOVERED
+    source_kind: SourceKind = SourceKind.VIDEO
     source: VideoCandidate | None = None
     source_path: str | None = None
     source_checksum: str | None = None
@@ -129,6 +285,14 @@ class JobManifest(BaseModel):
     rights_evidence: list[RightsEvidence] = Field(default_factory=list)
     approvals: list[Approval] = Field(default_factory=list)
     transcript_path: str | None = None
+    document_metadata: DocumentMetadata | None = None
+    extracted_document_path: str | None = None
+    content_selection_path: str | None = None
+    sections_path: str | None = None
+    script_path: str | None = None
+    story_bible_path: str | None = None
+    voice_bible_path: str | None = None
+    narration_manifest_path: str | None = None
     segments: list[Segment] = Field(default_factory=list)
     artifacts: list[Artifact] = Field(default_factory=list)
     uploads: list[UploadRecord] = Field(default_factory=list)

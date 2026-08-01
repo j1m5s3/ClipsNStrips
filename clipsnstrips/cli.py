@@ -7,11 +7,18 @@ from typing import Annotated
 
 import typer
 
+from clipsnstrips.analysis.document_content import GeminiFrontMatterAnalyzer
+from clipsnstrips.analysis.document_sections import GeminiDocumentScriptAnalyzer
 from clipsnstrips.analysis.highlights import GeminiHighlightAnalyzer
-from clipsnstrips.analysis.scene_context import GeminiSceneAnalyzer
+from clipsnstrips.analysis.scene_context import GeminiSceneAnalyzer, GeminiStoryAnalyzer
 from clipsnstrips.analysis.transcription import AssemblyAITranscriber
 from clipsnstrips.art.providers import OpenAIImageProvider
 from clipsnstrips.config import Settings
+from clipsnstrips.ingest.documents import (
+    GeminiDocumentOCR,
+    extract_document,
+    ingest_document,
+)
 from clipsnstrips.ingest.sources import download_youtube, ingest_local
 from clipsnstrips.jobs import JobStore, build_job_id
 from clipsnstrips.logging_config import configure_logging
@@ -20,8 +27,11 @@ from clipsnstrips.models import (
     JobManifest,
     RenderOptions,
     RightsEvidence,
+    ScriptMode,
+    SourceKind,
     VideoCandidate,
 )
+from clipsnstrips.narration.providers import ElevenLabsNarrationProvider
 from clipsnstrips.pipeline import Pipeline
 from clipsnstrips.review import (
     bypass_processing_gate,
@@ -263,6 +273,7 @@ def process_youtube(
             seconds_per_panel=settings.art_seconds_per_panel,
             min_panels=settings.art_min_panels,
             max_panels=settings.art_max_panels,
+            subpanels_per_image=settings.art_subpanels_per_image,
             representative_frame_count=settings.reference_frame_count,
             reference_frame_max_width=settings.reference_frame_max_width,
             moderation_fallback_enabled=settings.art_moderation_fallback_enabled,
@@ -359,6 +370,7 @@ def run_e2e(
             seconds_per_panel=settings.art_seconds_per_panel,
             min_panels=settings.art_min_panels,
             max_panels=settings.art_max_panels,
+            subpanels_per_image=settings.art_subpanels_per_image,
             representative_frame_count=settings.reference_frame_count,
             reference_frame_max_width=settings.reference_frame_max_width,
             moderation_fallback_enabled=settings.art_moderation_fallback_enabled,
@@ -371,6 +383,290 @@ def run_e2e(
             "illustrated_videos": [str(path) for path in illustrated],
         }
     )
+
+
+@app.command("create-document")
+def create_document(title: str = "Document") -> None:
+    """Create a review job for an authorized document source."""
+    _, store = context()
+    manifest = store.create(
+        JobManifest(
+            id=build_job_id(title, "document"),
+            source_kind=SourceKind.DOCUMENT,
+        )
+    )
+    typer.echo(manifest.id)
+
+
+@app.command("ingest-document")
+def ingest_document_command(
+    job_id: str,
+    source: Path,
+    no_approval: bool = typer.Option(False, "--no-approval"),
+) -> None:
+    settings, store = context()
+    if no_approval:
+        bypass_processing_gate(store, job_id, "ingest")
+    path = ingest_document(
+        store,
+        store.load(job_id),
+        source,
+        max_bytes=settings.document_max_bytes,
+    )
+    typer.echo(path)
+
+
+@app.command("extract-document")
+def extract_document_command(
+    job_id: str,
+    no_approval: bool = typer.Option(False, "--no-approval"),
+) -> None:
+    settings, store = context()
+    if no_approval:
+        bypass_processing_gate(store, job_id, "ingest")
+    document = extract_document(
+        store,
+        store.load(job_id),
+        GeminiDocumentOCR(
+            settings.require("gemini_api_key"),
+            settings.document_ocr_model,
+        ),
+        max_pages=settings.document_max_pages,
+        embedded_text_min_chars=settings.document_ocr_min_chars,
+    )
+    print_json(document.model_dump(mode="json"))
+
+
+@app.command("analyze-document")
+def analyze_document_command(
+    job_id: str,
+    mode: ScriptMode = ScriptMode.FAITHFUL,
+    no_approval: bool = typer.Option(False, "--no-approval"),
+    content_start_page: int | None = typer.Option(
+        None,
+        "--content-start-page",
+        min=1,
+        help="One-based page where core narrated content begins.",
+    ),
+) -> None:
+    settings, store = context()
+    if no_approval:
+        bypass_processing_gate(store, job_id, "ingest")
+    pipeline = Pipeline(store, FFmpeg(settings.ffmpeg_binary, settings.ffprobe_binary))
+    preflight = pipeline.analyze_document(
+        job_id,
+        ocr=GeminiDocumentOCR(
+            settings.require("gemini_api_key"),
+            settings.document_ocr_model,
+        ),
+        script_analyzer=GeminiDocumentScriptAnalyzer(
+            settings.require("gemini_api_key"),
+            settings.gemini_model,
+        )
+        if mode == ScriptMode.ADAPTED
+        else None,
+        story_analyzer=GeminiStoryAnalyzer(
+            settings.require("gemini_api_key"),
+            settings.scene_context_model,
+        ),
+        mode=mode,
+        front_matter_analyzer=(
+            GeminiFrontMatterAnalyzer(
+                settings.require("gemini_api_key"),
+                settings.gemini_model,
+            )
+            if content_start_page is not None
+            else None
+        ),
+        content_start_page=content_start_page,
+        front_matter_max_chars=settings.document_front_matter_max_chars,
+        target_section_words=settings.document_target_section_words,
+        max_section_words=settings.document_max_section_words,
+        max_pages=settings.document_max_pages,
+        embedded_text_min_chars=settings.document_ocr_min_chars,
+    )
+    print_json(preflight)
+
+
+@app.command("synthesize-narration")
+def synthesize_narration_command(
+    job_id: str,
+    confirm_cost: bool = typer.Option(False, "--confirm-cost"),
+    no_approval: bool = typer.Option(False, "--no-approval"),
+) -> None:
+    settings, store = context()
+    if no_approval:
+        bypass_processing_gate(store, job_id, "spans")
+    pipeline = Pipeline(store, FFmpeg(settings.ffmpeg_binary, settings.ffprobe_binary))
+    preflight = pipeline.document_preflight(
+        job_id,
+        words_per_panel=settings.document_words_per_panel,
+        subpanels_per_image=settings.art_subpanels_per_image,
+    )
+    print_json(preflight)
+    if preflight["narration_characters"] > settings.document_max_narration_characters:
+        raise typer.BadParameter("Narration exceeds configured character limit")
+    if not confirm_cost:
+        raise typer.BadParameter("Paid narration requires --confirm-cost")
+    narration = pipeline.synthesize_document_narration(
+        job_id,
+        ElevenLabsNarrationProvider(
+            settings.require("elevenlabs_api_key"),
+            model=settings.elevenlabs_model,
+            output_format=settings.elevenlabs_output_format,
+            stability=settings.elevenlabs_stability,
+            similarity_boost=settings.elevenlabs_similarity_boost,
+            style=settings.elevenlabs_style,
+        ),
+        voice_ids=settings.elevenlabs_voice_ids,
+        pause_seconds=settings.narration_pause_seconds,
+        audio_lufs=settings.narration_audio_lufs,
+    )
+    print_json(narration.model_dump(mode="json"))
+
+
+@app.command("render-document")
+def render_document_command(
+    job_id: str,
+    style: str = "cinematic editorial comic, clean ink, rich color, no text",
+    confirm_cost: bool = typer.Option(False, "--confirm-cost"),
+    no_approval: bool = typer.Option(False, "--no-approval"),
+) -> None:
+    settings, store = context()
+    if no_approval:
+        bypass_processing_gate(store, job_id, "spans")
+    if not confirm_cost:
+        raise typer.BadParameter("Paid image rendering requires --confirm-cost")
+    pipeline = Pipeline(store, FFmpeg(settings.ffmpeg_binary, settings.ffprobe_binary))
+    output = pipeline.render_document(
+        job_id,
+        OpenAIImageProvider(
+            settings.require("openai_api_key"),
+            model=settings.openai_image_model,
+            input_fidelity=settings.openai_image_fidelity,
+        ),
+        GeminiStoryAnalyzer(
+            settings.require("gemini_api_key"),
+            settings.scene_context_model,
+        ),
+        style=style,
+        words_per_panel=settings.document_words_per_panel,
+        min_panels=settings.document_min_panels,
+        max_panels=settings.document_max_panels,
+        subpanels_per_image=settings.art_subpanels_per_image,
+        moderation_fallback_enabled=settings.art_moderation_fallback_enabled,
+        moderation_final_action=settings.art_moderation_final_action,
+    )
+    typer.echo(output)
+
+
+@app.command("process-document")
+def process_document(
+    source: Path,
+    mode: ScriptMode = ScriptMode.FAITHFUL,
+    no_approval: bool = typer.Option(False, "--no-approval"),
+    confirm_cost: bool = typer.Option(False, "--confirm-cost"),
+    content_start_page: int | None = typer.Option(
+        None,
+        "--content-start-page",
+        min=1,
+        help="One-based page where core narrated content begins.",
+    ),
+) -> None:
+    if not no_approval:
+        raise typer.BadParameter("process-document requires --no-approval")
+    if not confirm_cost:
+        raise typer.BadParameter("process-document requires --confirm-cost")
+    settings, store = context()
+    manifest = store.create(
+        JobManifest(
+            id=build_job_id(source.stem, "document"),
+            source_kind=SourceKind.DOCUMENT,
+        )
+    )
+    bypass_processing_gate(store, manifest.id, "ingest")
+    ingest_document(
+        store,
+        store.load(manifest.id),
+        source,
+        max_bytes=settings.document_max_bytes,
+    )
+    pipeline = Pipeline(store, FFmpeg(settings.ffmpeg_binary, settings.ffprobe_binary))
+    pipeline.analyze_document(
+        manifest.id,
+        ocr=GeminiDocumentOCR(
+            settings.require("gemini_api_key"),
+            settings.document_ocr_model,
+        ),
+        script_analyzer=GeminiDocumentScriptAnalyzer(
+            settings.require("gemini_api_key"),
+            settings.gemini_model,
+        )
+        if mode == ScriptMode.ADAPTED
+        else None,
+        story_analyzer=GeminiStoryAnalyzer(
+            settings.require("gemini_api_key"),
+            settings.scene_context_model,
+        ),
+        mode=mode,
+        front_matter_analyzer=(
+            GeminiFrontMatterAnalyzer(
+                settings.require("gemini_api_key"),
+                settings.gemini_model,
+            )
+            if content_start_page is not None
+            else None
+        ),
+        content_start_page=content_start_page,
+        front_matter_max_chars=settings.document_front_matter_max_chars,
+        target_section_words=settings.document_target_section_words,
+        max_section_words=settings.document_max_section_words,
+        max_pages=settings.document_max_pages,
+        embedded_text_min_chars=settings.document_ocr_min_chars,
+    )
+    bypass_processing_gate(store, manifest.id, "spans")
+    preflight = pipeline.document_preflight(
+        manifest.id,
+        words_per_panel=settings.document_words_per_panel,
+        subpanels_per_image=settings.art_subpanels_per_image,
+    )
+    print_json(preflight)
+    if preflight["narration_characters"] > settings.document_max_narration_characters:
+        raise typer.BadParameter("Narration exceeds configured character limit")
+    pipeline.synthesize_document_narration(
+        manifest.id,
+        ElevenLabsNarrationProvider(
+            settings.require("elevenlabs_api_key"),
+            model=settings.elevenlabs_model,
+            output_format=settings.elevenlabs_output_format,
+            stability=settings.elevenlabs_stability,
+            similarity_boost=settings.elevenlabs_similarity_boost,
+            style=settings.elevenlabs_style,
+        ),
+        voice_ids=settings.elevenlabs_voice_ids,
+        pause_seconds=settings.narration_pause_seconds,
+        audio_lufs=settings.narration_audio_lufs,
+    )
+    output = pipeline.render_document(
+        manifest.id,
+        OpenAIImageProvider(
+            settings.require("openai_api_key"),
+            model=settings.openai_image_model,
+            input_fidelity=settings.openai_image_fidelity,
+        ),
+        GeminiStoryAnalyzer(
+            settings.require("gemini_api_key"),
+            settings.scene_context_model,
+        ),
+        style="cinematic editorial comic, clean ink, rich color, no text",
+        words_per_panel=settings.document_words_per_panel,
+        min_panels=settings.document_min_panels,
+        max_panels=settings.document_max_panels,
+        subpanels_per_image=settings.art_subpanels_per_image,
+        moderation_fallback_enabled=settings.art_moderation_fallback_enabled,
+        moderation_final_action=settings.art_moderation_final_action,
+    )
+    print_json({"job_id": manifest.id, "output": str(output)})
 
 
 @app.command()
@@ -512,6 +808,7 @@ def render_art(
         seconds_per_panel=settings.art_seconds_per_panel,
         min_panels=settings.art_min_panels,
         max_panels=settings.art_max_panels,
+        subpanels_per_image=settings.art_subpanels_per_image,
         representative_frame_count=settings.reference_frame_count,
         reference_frame_max_width=settings.reference_frame_max_width,
         segment_ids=set(segment_id) if segment_id else None,
