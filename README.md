@@ -117,6 +117,105 @@ LOG_BACKUP_COUNT=5
 Set `LOG_LEVEL=DEBUG` for FFmpeg command details and job persistence events. API keys,
 OAuth tokens, full transcripts, and AI prompts are not written to logs.
 
+## Document-to-long-form videos
+
+ClipsNStrips accepts text-based or scanned `.pdf`, `.docx`, `.txt`, and `.md` documents.
+Embedded PDF text is extracted locally with PyMuPDF. Pages without sufficient embedded text
+are rendered and sent to the configured Gemini OCR model; page images, extraction methods,
+checksums, and OCR results are cached. OCR sends page content to Google and may incur cost,
+so do not process confidential documents without authorization.
+
+Two script modes are available:
+
+- `faithful` keeps the original wording and source character offsets.
+- `adapted` creates cinematic narration/dialogue while retaining source-span provenance and
+  marking every generated line as adapted.
+
+ElevenLabs generates one cached narration line at a time. The first configured voice is the
+narrator; remaining voice IDs are deterministically assigned to stable story-character IDs.
+The MVP uses configured library voices and does not clone real voices.
+
+Configure document generation in `.env`:
+
+```dotenv
+ELEVENLABS_API_KEY=
+ELEVENLABS_MODEL=eleven_multilingual_v2
+ELEVENLABS_OUTPUT_FORMAT=mp3_44100_128
+ELEVENLABS_VOICE_IDS=["NARRATOR_VOICE_ID","CHARACTER_VOICE_ID"]
+DOCUMENT_OCR_MODEL=gemini-3.6-flash
+DOCUMENT_FRONT_MATTER_MAX_CHARS=20000
+DOCUMENT_TARGET_SECTION_WORDS=900
+DOCUMENT_WORDS_PER_PANEL=90
+ART_SUBPANELS_PER_IMAGE=4
+DOCUMENT_MAX_NARRATION_CHARACTERS=500000
+NARRATION_PAUSE_SECONDS=0.25
+```
+
+Run the staged, reviewable workflow:
+
+```powershell
+uv run clipsnstrips create-document --title "Authorized story"
+uv run clipsnstrips approve JOB_ID ingest REVIEWER "Owned manuscript"
+uv run clipsnstrips ingest-document JOB_ID C:\docs\story.pdf
+uv run clipsnstrips extract-document JOB_ID
+uv run clipsnstrips analyze-document JOB_ID --mode faithful
+uv run clipsnstrips select-spans JOB_ID SECTION_ID_1 SECTION_ID_2
+uv run clipsnstrips approve JOB_ID spans REVIEWER "Reviewed source-linked script"
+uv run clipsnstrips synthesize-narration JOB_ID --confirm-cost
+uv run clipsnstrips render-document JOB_ID --confirm-cost
+```
+
+For documents with technical front matter, provide the one-based page where the core
+content begins:
+
+```powershell
+uv run clipsnstrips analyze-document JOB_ID --mode faithful --content-start-page 3
+uv run clipsnstrips process-document C:\docs\story.pdf `
+  --content-start-page 3 --no-approval --confirm-cost
+```
+
+The full extraction remains in `analysis/document.json`. Gemini scans only the bounded text
+before the selected page for an explicitly supported title and author. Those values are
+narrated once, then narration continues from the first character of the selected page,
+including its chapter heading. Unsupported metadata is omitted rather than inferred. The
+validated boundary and evidence are stored in `analysis/content-selection.json`; without
+`--content-start-page`, analysis retains the existing all-content behavior.
+
+For an explicitly automated run:
+
+```powershell
+uv run clipsnstrips process-document C:\docs\story.docx `
+  --mode adapted --no-approval --confirm-cost
+```
+
+The preflight reports pages, words, narration characters, estimated duration, logical visual
+events, composite comic pages, TTS requests, and estimated image requests before narration
+starts. Narration lines, comic pages, derived cell crops, and section videos checkpoint
+independently. Output is organized under:
+
+```text
+output/<job-id>/
+  analysis/document.json
+  analysis/content-selection.json
+  analysis/sections.json
+  analysis/script.json
+  analysis/story-bible.json
+  analysis/voice-bible.json
+  narration/lines/
+  narration/sections/
+  narration/full-track.wav
+  narration/narration.json
+  art/story-references/
+  art/<section-id>/page-NNN.png
+  art/<section-id>/page-NNN-cell-N.png
+  art/<section-id>/panel-video.mp4
+  art/document-video.mp4
+```
+
+Document ownership, voice licensing, output review, and YouTube publication remain subject
+to the existing approval gates. OCR, Gemini analysis, ElevenLabs speech, and OpenAI images
+can all incur separate charges.
+
 ## Workflow
 
 Discover without writing job folders:
@@ -184,12 +283,18 @@ Highlight candidate count scales with source duration using
 `HIGHLIGHT_SECONDS_PER_CANDIDATE`, bounded by `HIGHLIGHT_MIN_CANDIDATES` and
 `HIGHLIGHT_MAX_CANDIDATES`.
 
-Art rendering creates approximately one panel per `ART_SECONDS_PER_PANEL` seconds, bounded
-by `ART_MIN_PANELS` and `ART_MAX_PANELS`. Each panel uses its matching transcript excerpt
-and a source frame from the same timestamp. Gemini analyzes the segment frames into a
-segment-scoped subject bible; OpenAI then uses multi-image editing rather than text-only
-generation. Later panels also receive the preceding generated panel, preserving the comic
-style without carrying visual identity between unrelated segments.
+Art rendering creates approximately one logical visual event per `ART_SECONDS_PER_PANEL`
+seconds, bounded by `ART_MIN_PANELS` and `ART_MAX_PANELS`. By default, four adjacent events
+within one segment or document section are generated in a single vertical 2x2 comic page.
+The page is then split into fixed top-left, top-right, bottom-left, and bottom-right crops,
+which play sequentially for their original event durations. This can reduce event-art image
+requests by up to 75%, with lower per-event source resolution as the tradeoff. Set
+`ART_SUBPANELS_PER_IMAGE=1` to retain one image request per event.
+
+Each event uses its matching transcript excerpt and source frame. Gemini analyzes the segment
+frames into a segment-scoped subject bible; OpenAI then uses multi-image editing rather than
+text-only generation. Later comic pages receive the preceding generated page, preserving the
+comic style without carrying visual identity between unrelated segments.
 
 Reference behavior is configurable:
 
@@ -199,14 +304,16 @@ OPENAI_IMAGE_MODEL=gpt-image-1
 OPENAI_IMAGE_FIDELITY=high
 ART_MODERATION_FALLBACK_ENABLED=true
 ART_MODERATION_FINAL_ACTION=placeholder
+ART_SUBPANELS_PER_IMAGE=4
 REFERENCE_FRAME_COUNT=6
 REFERENCE_FRAME_MAX_WIDTH=1024
 ```
 
 High-fidelity multi-image edits and scene analysis are paid API calls. References, context,
-and completed panels are reused only while the source checksum, timestamps, models, prompts,
-and reference checksums match. Changing any of them invalidates the affected segment cache.
-Each completed panel is checkpointed immediately so an interrupted run can resume.
+completed pages, and derived crops are reused only while the source checksum, timestamps,
+models, prompts, layout, and reference checksums match. Changing any of them invalidates the
+affected segment cache. Each completed page is checkpointed immediately so an interrupted
+run can resume.
 
 ### Image moderation fallback
 
