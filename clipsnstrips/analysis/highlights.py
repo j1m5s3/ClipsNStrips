@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 from contextlib import suppress
 from pathlib import Path
@@ -144,3 +145,22 @@ def validate_segments(
         len(accepted),
     )
     return accepted
+
+
+def scaled_candidate_limit(
+    media_duration: float | None,
+    *,
+    seconds_per_candidate: float = 120,
+    min_candidates: int = 3,
+    max_candidates: int = 12,
+) -> int:
+    if seconds_per_candidate <= 0:
+        raise ValueError("seconds_per_candidate must be positive")
+    if min_candidates < 1 or max_candidates < min_candidates:
+        raise ValueError("candidate limits are invalid")
+    if media_duration is None:
+        return min_candidates
+    return min(
+        max(math.ceil(media_duration / seconds_per_candidate), min_candidates),
+        max_candidates,
+    )

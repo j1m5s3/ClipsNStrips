@@ -23,7 +23,17 @@ class Settings(BaseSettings):
     assemblyai_api_key: str | None = None
     gemini_api_key: str | None = None
     gemini_model: str = "gemini-3.6-flash"
+    scene_context_model: str = "gemini-3.6-flash"
     openai_api_key: str | None = None
+    openai_image_model: str = "gpt-image-1"
+    openai_image_fidelity: str = Field(default="high", pattern="^(low|high)$")
+    art_moderation_fallback_enabled: bool = True
+    art_moderation_final_action: str = Field(
+        default="placeholder",
+        pattern="^(placeholder|fail)$",
+    )
+    reference_frame_count: int = Field(default=6, ge=1, le=15)
+    reference_frame_max_width: int = Field(default=1024, ge=256, le=2048)
     ffmpeg_binary: str = "ffmpeg"
     ffprobe_binary: str = "ffprobe"
     log_dir: Path | None = None
@@ -34,6 +44,12 @@ class Settings(BaseSettings):
     owned_channel_ids: set[str] = Field(default_factory=set)
     min_clip_seconds: float = 15
     max_clip_seconds: float = 60
+    highlight_seconds_per_candidate: float = 120
+    highlight_min_candidates: int = 3
+    highlight_max_candidates: int = 12
+    art_seconds_per_panel: float = 8
+    art_min_panels: int = 3
+    art_max_panels: int = 12
 
     def require(self, name: str) -> str:
         value = getattr(self, name)

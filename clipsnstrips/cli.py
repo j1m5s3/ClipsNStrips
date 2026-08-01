@@ -3,15 +3,17 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from typing import Annotated
 
 import typer
 
 from clipsnstrips.analysis.highlights import GeminiHighlightAnalyzer
+from clipsnstrips.analysis.scene_context import GeminiSceneAnalyzer
 from clipsnstrips.analysis.transcription import AssemblyAITranscriber
 from clipsnstrips.art.providers import OpenAIImageProvider
 from clipsnstrips.config import Settings
 from clipsnstrips.ingest.sources import download_youtube, ingest_local
-from clipsnstrips.jobs import JobStore
+from clipsnstrips.jobs import JobStore, build_job_id
 from clipsnstrips.logging_config import configure_logging
 from clipsnstrips.media.ffmpeg import FFmpeg
 from clipsnstrips.models import (
@@ -21,7 +23,11 @@ from clipsnstrips.models import (
     VideoCandidate,
 )
 from clipsnstrips.pipeline import Pipeline
-from clipsnstrips.review import record_approval, set_segment_approval
+from clipsnstrips.review import (
+    bypass_processing_gate,
+    record_approval,
+    set_segment_approval,
+)
 from clipsnstrips.youtube.discovery import YouTubeDiscovery
 from clipsnstrips.youtube.oauth import youtube_credentials
 from clipsnstrips.youtube.upload import YouTubeUploader
@@ -71,7 +77,13 @@ def discover(
         return
     job_ids = []
     for candidate in candidates:
-        manifest = store.create(JobManifest(source=candidate, rights_state=candidate.rights_state))
+        manifest = store.create(
+            JobManifest(
+                id=build_job_id(candidate.title, candidate.channel_title),
+                source=candidate,
+                rights_state=candidate.rights_state,
+            )
+        )
         store.write_json(
             manifest.id,
             "source/youtube_metadata.json",
@@ -85,14 +97,17 @@ def discover(
 def create_local(title: str = "Local media") -> None:
     """Create a review job for user-supplied media."""
     _, store = context()
+    candidate = VideoCandidate(
+        video_id="local",
+        title=title,
+        channel_id="local",
+        channel_title="Local",
+        risk_reasons=["Local media requires an authorization attestation"],
+    )
     manifest = store.create(
         JobManifest(
-            source=VideoCandidate(
-                video_id="local",
-                title=title,
-                channel_id="local",
-                risk_reasons=["Local media requires an authorization attestation"],
-            )
+            id=build_job_id(candidate.title, candidate.channel_title),
+            source=candidate,
         )
     )
     typer.echo(manifest.id)
@@ -104,6 +119,11 @@ def process_youtube(
     reviewer: str | None = None,
     vertical: bool = True,
     art: bool = False,
+    no_approval: bool = typer.Option(
+        False,
+        "--no-approval",
+        help="Bypass processing approvals and record the override.",
+    ),
 ) -> None:
     """Interactively review and process one authorized YouTube URL."""
     settings, store = context()
@@ -114,7 +134,13 @@ def process_youtube(
         settings.owned_channel_ids,
     )
     candidate = discovery.by_id(video_id)
-    manifest = store.create(JobManifest(source=candidate, rights_state=candidate.rights_state))
+    manifest = store.create(
+        JobManifest(
+            id=build_job_id(candidate.title, candidate.channel_title),
+            source=candidate,
+            rights_state=candidate.rights_state,
+        )
+    )
     store.write_json(
         manifest.id,
         "source/youtube_metadata.json",
@@ -132,31 +158,36 @@ def process_youtube(
         }
     )
 
-    typer.confirm(
-        "Do you attest that YouTube and the applicable rights holders authorize "
-        "downloading and processing this video?",
-        default=False,
-        abort=True,
+    reviewer_name = reviewer or (
+        "CLI --no-approval" if no_approval else typer.prompt("Reviewer name")
     )
-    reviewer_name = reviewer or typer.prompt("Reviewer name")
-    authorization_notes = typer.prompt("Authorization basis and evidence")
-    manifest = store.load(manifest.id)
-    manifest.rights_evidence.append(
-        RightsEvidence(
-            kind="authorization_attestation",
-            value="authorized_for_download_and_processing",
-            source=f"https://www.youtube.com/watch?v={video_id}",
+    if no_approval:
+        bypass_processing_gate(store, manifest.id, "ingest")
+    else:
+        typer.confirm(
+            "Do you attest that YouTube and the applicable rights holders authorize "
+            "downloading and processing this video?",
+            default=False,
+            abort=True,
         )
-    )
-    store.save(manifest)
-    record_approval(
-        store,
-        manifest.id,
-        purpose="ingest",
-        reviewer=reviewer_name,
-        approved=True,
-        notes=authorization_notes,
-    )
+        authorization_notes = typer.prompt("Authorization basis and evidence")
+        manifest = store.load(manifest.id)
+        manifest.rights_evidence.append(
+            RightsEvidence(
+                kind="authorization_attestation",
+                value="authorized_for_download_and_processing",
+                source=f"https://www.youtube.com/watch?v={video_id}",
+            )
+        )
+        store.save(manifest)
+        record_approval(
+            store,
+            manifest.id,
+            purpose="ingest",
+            reviewer=reviewer_name,
+            approved=True,
+            notes=authorization_notes,
+        )
     download_youtube(store, store.load(manifest.id), url)
 
     pipeline = Pipeline(
@@ -172,32 +203,38 @@ def process_youtube(
         ),
         min_seconds=settings.min_clip_seconds,
         max_seconds=settings.max_clip_seconds,
+        seconds_per_candidate=settings.highlight_seconds_per_candidate,
+        min_candidates=settings.highlight_min_candidates,
+        max_candidates=settings.highlight_max_candidates,
     )
     analyzed = store.load(manifest.id)
     print_json([segment.model_dump(mode="json") for segment in analyzed.segments])
     if not analyzed.segments:
         raise RuntimeError("Analysis returned no valid candidate segments")
 
-    selection = typer.prompt("Comma-separated segment IDs to render")
-    selected_ids = {
-        value.strip() for value in selection.replace(" ", ",").split(",") if value.strip()
-    }
-    if not selected_ids:
-        raise typer.BadParameter("Select at least one segment")
-    set_segment_approval(store, manifest.id, selected_ids)
-    typer.confirm(
-        "Have you reviewed the selected spans in their original context?",
-        default=False,
-        abort=True,
-    )
-    record_approval(
-        store,
-        manifest.id,
-        purpose="spans",
-        reviewer=reviewer_name,
-        approved=True,
-        notes="Selected spans reviewed interactively in original source context",
-    )
+    if no_approval:
+        bypass_processing_gate(store, manifest.id, "spans")
+    else:
+        selection = typer.prompt("Comma-separated segment IDs to render")
+        selected_ids = {
+            value.strip() for value in selection.replace(" ", ",").split(",") if value.strip()
+        }
+        if not selected_ids:
+            raise typer.BadParameter("Select at least one segment")
+        set_segment_approval(store, manifest.id, selected_ids)
+        typer.confirm(
+            "Have you reviewed the selected spans in their original context?",
+            default=False,
+            abort=True,
+        )
+        record_approval(
+            store,
+            manifest.id,
+            purpose="spans",
+            reviewer=reviewer_name,
+            approved=True,
+            notes="Selected spans reviewed interactively in original source context",
+        )
 
     clips = pipeline.render_clips(
         manifest.id,
@@ -205,17 +242,128 @@ def process_youtube(
     )
     illustrated: list[Path] = []
     if art:
-        typer.confirm(
-            "Generate paid AI artwork for the selected spans?",
-            default=False,
-            abort=True,
-        )
+        if not no_approval:
+            typer.confirm(
+                "Generate paid AI artwork for the selected spans?",
+                default=False,
+                abort=True,
+            )
         illustrated = pipeline.render_art(
             manifest.id,
-            OpenAIImageProvider(settings.require("openai_api_key")),
+            OpenAIImageProvider(
+                settings.require("openai_api_key"),
+                model=settings.openai_image_model,
+                input_fidelity=settings.openai_image_fidelity,
+            ),
+            GeminiSceneAnalyzer(
+                settings.require("gemini_api_key"),
+                settings.scene_context_model,
+            ),
             style="cinematic editorial comic, clean ink, rich color, no text",
+            seconds_per_panel=settings.art_seconds_per_panel,
+            min_panels=settings.art_min_panels,
+            max_panels=settings.art_max_panels,
+            representative_frame_count=settings.reference_frame_count,
+            reference_frame_max_width=settings.reference_frame_max_width,
+            moderation_fallback_enabled=settings.art_moderation_fallback_enabled,
+            moderation_final_action=settings.art_moderation_final_action,
         )
     logger.info("Completed interactive YouTube workflow job_id=%s", manifest.id)
+    print_json(
+        {
+            "job_id": manifest.id,
+            "clips": [str(path) for path in clips],
+            "illustrated_videos": [str(path) for path in illustrated],
+        }
+    )
+
+
+@app.command("run-e2e")
+def run_e2e(
+    source: str,
+    no_approval: bool = typer.Option(
+        False,
+        "--no-approval",
+        help="Required explicit processing-gate bypass.",
+    ),
+    vertical: bool = True,
+    art: bool = False,
+) -> None:
+    """Run every processing stage; requires the explicit no-approval flag."""
+    if not no_approval:
+        raise typer.BadParameter("run-e2e requires --no-approval")
+
+    local_source = Path(source)
+    if not local_source.is_file():
+        process_youtube(
+            source,
+            reviewer="CLI --no-approval",
+            vertical=vertical,
+            art=art,
+            no_approval=True,
+        )
+        return
+
+    settings, store = context()
+    candidate = VideoCandidate(
+        video_id="local",
+        title=local_source.name,
+        channel_id="local",
+        channel_title="Local",
+        risk_reasons=["Local source processed with --no-approval"],
+    )
+    manifest = store.create(
+        JobManifest(
+            id=build_job_id(candidate.title, candidate.channel_title),
+            source=candidate,
+        )
+    )
+    bypass_processing_gate(store, manifest.id, "ingest")
+    ingest_local(store, store.load(manifest.id), local_source)
+    pipeline = Pipeline(
+        store,
+        FFmpeg(settings.ffmpeg_binary, settings.ffprobe_binary),
+    )
+    pipeline.analyze(
+        manifest.id,
+        AssemblyAITranscriber(settings.require("assemblyai_api_key")),
+        GeminiHighlightAnalyzer(
+            settings.require("gemini_api_key"),
+            model=settings.gemini_model,
+        ),
+        min_seconds=settings.min_clip_seconds,
+        max_seconds=settings.max_clip_seconds,
+        seconds_per_candidate=settings.highlight_seconds_per_candidate,
+        min_candidates=settings.highlight_min_candidates,
+        max_candidates=settings.highlight_max_candidates,
+    )
+    bypass_processing_gate(store, manifest.id, "spans")
+    clips = pipeline.render_clips(
+        manifest.id,
+        RenderOptions(vertical=vertical),
+    )
+    illustrated: list[Path] = []
+    if art:
+        illustrated = pipeline.render_art(
+            manifest.id,
+            OpenAIImageProvider(
+                settings.require("openai_api_key"),
+                model=settings.openai_image_model,
+                input_fidelity=settings.openai_image_fidelity,
+            ),
+            GeminiSceneAnalyzer(
+                settings.require("gemini_api_key"),
+                settings.scene_context_model,
+            ),
+            style="cinematic editorial comic, clean ink, rich color, no text",
+            seconds_per_panel=settings.art_seconds_per_panel,
+            min_panels=settings.art_min_panels,
+            max_panels=settings.art_max_panels,
+            representative_frame_count=settings.reference_frame_count,
+            reference_frame_max_width=settings.reference_frame_max_width,
+            moderation_fallback_enabled=settings.art_moderation_fallback_enabled,
+            moderation_final_action=settings.art_moderation_final_action,
+        )
     print_json(
         {
             "job_id": manifest.id,
@@ -259,21 +407,38 @@ def approve(
 
 
 @app.command("ingest-local")
-def ingest_local_command(job_id: str, source: Path) -> None:
+def ingest_local_command(
+    job_id: str,
+    source: Path,
+    no_approval: bool = typer.Option(False, "--no-approval"),
+) -> None:
     _, store = context()
+    if no_approval:
+        bypass_processing_gate(store, job_id, "ingest")
     typer.echo(ingest_local(store, store.load(job_id), source))
 
 
 @app.command("download-youtube")
-def download_youtube_command(job_id: str, url: str) -> None:
+def download_youtube_command(
+    job_id: str,
+    url: str,
+    no_approval: bool = typer.Option(False, "--no-approval"),
+) -> None:
     """Download only a source whose authorization is documented in the job."""
     _, store = context()
+    if no_approval:
+        bypass_processing_gate(store, job_id, "ingest")
     typer.echo(download_youtube(store, store.load(job_id), url))
 
 
 @app.command()
-def analyze(job_id: str) -> None:
+def analyze(
+    job_id: str,
+    no_approval: bool = typer.Option(False, "--no-approval"),
+) -> None:
     settings, store = context()
+    if no_approval:
+        bypass_processing_gate(store, job_id, "ingest")
     pipeline = Pipeline(
         store,
         FFmpeg(settings.ffmpeg_binary, settings.ffprobe_binary),
@@ -287,6 +452,9 @@ def analyze(job_id: str) -> None:
         ),
         min_seconds=settings.min_clip_seconds,
         max_seconds=settings.max_clip_seconds,
+        seconds_per_candidate=settings.highlight_seconds_per_candidate,
+        min_candidates=settings.highlight_min_candidates,
+        max_candidates=settings.highlight_max_candidates,
     )
     manifest = store.load(job_id)
     print_json([segment.model_dump(mode="json") for segment in manifest.segments])
@@ -301,8 +469,11 @@ def select_spans(job_id: str, segment_ids: list[str]) -> None:
 def render_clips(
     job_id: str,
     vertical: bool = False,
+    no_approval: bool = typer.Option(False, "--no-approval"),
 ) -> None:
     settings, store = context()
+    if no_approval:
+        bypass_processing_gate(store, job_id, "spans")
     pipeline = Pipeline(store, FFmpeg(settings.ffmpeg_binary, settings.ffprobe_binary))
     print_json(
         [
@@ -319,13 +490,33 @@ def render_clips(
 def render_art(
     job_id: str,
     style: str = "cinematic editorial comic, clean ink, rich color, no text",
+    no_approval: bool = typer.Option(False, "--no-approval"),
+    segment_id: Annotated[list[str] | None, typer.Option("--segment-id")] = None,
 ) -> None:
     settings, store = context()
+    if no_approval:
+        bypass_processing_gate(store, job_id, "spans")
     pipeline = Pipeline(store, FFmpeg(settings.ffmpeg_binary, settings.ffprobe_binary))
     outputs = pipeline.render_art(
         job_id,
-        OpenAIImageProvider(settings.require("openai_api_key")),
+        OpenAIImageProvider(
+            settings.require("openai_api_key"),
+            model=settings.openai_image_model,
+            input_fidelity=settings.openai_image_fidelity,
+        ),
+        GeminiSceneAnalyzer(
+            settings.require("gemini_api_key"),
+            settings.scene_context_model,
+        ),
         style=style,
+        seconds_per_panel=settings.art_seconds_per_panel,
+        min_panels=settings.art_min_panels,
+        max_panels=settings.art_max_panels,
+        representative_frame_count=settings.reference_frame_count,
+        reference_frame_max_width=settings.reference_frame_max_width,
+        segment_ids=set(segment_id) if segment_id else None,
+        moderation_fallback_enabled=settings.art_moderation_fallback_enabled,
+        moderation_final_action=settings.art_moderation_final_action,
     )
     print_json([str(path) for path in outputs])
 

@@ -3,11 +3,44 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
+import unicodedata
+from datetime import UTC, datetime
 from pathlib import Path
 
 from clipsnstrips.models import JobManifest, utc_now
 
 logger = logging.getLogger(__name__)
+
+
+def build_job_id(
+    video_title: str,
+    channel_title: str,
+    *,
+    timestamp: datetime | None = None,
+    max_component_length: int = 48,
+) -> str:
+    moment = timestamp or datetime.now(UTC)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    stamp = moment.astimezone(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    video = _condense_component(
+        video_title,
+        fallback="video",
+        max_length=max_component_length,
+    )
+    channel = _condense_component(
+        channel_title,
+        fallback="channel",
+        max_length=max_component_length,
+    )
+    return f"{video}_{channel}_{stamp}"
+
+
+def _condense_component(value: str, *, fallback: str, max_length: int) -> str:
+    ascii_value = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
+    condensed = re.sub(r"[^a-z0-9]+", "", ascii_value.casefold())
+    return (condensed or fallback)[:max_length]
 
 
 class JobStore:

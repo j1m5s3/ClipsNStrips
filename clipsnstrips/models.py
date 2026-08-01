@@ -43,6 +43,7 @@ class Approval(BaseModel):
     approved: bool
     reviewer: str
     notes: str
+    bypassed: bool = False
     created_at: datetime = Field(default_factory=utc_now)
 
 
@@ -149,8 +150,10 @@ class JobManifest(BaseModel):
             for existing in self.artifacts
             if not (
                 existing.kind == artifact.kind
-                and existing.path == artifact.path
-                and existing.segment_id == artifact.segment_id
+                and (
+                    (artifact.segment_id is not None and existing.segment_id == artifact.segment_id)
+                    or (artifact.segment_id is None and existing.path == artifact.path)
+                )
             )
         ]
         self.artifacts.append(artifact)

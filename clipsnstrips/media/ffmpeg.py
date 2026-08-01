@@ -58,6 +58,67 @@ class FFmpeg:
         )
         return destination
 
+    def extract_frame(
+        self,
+        source: Path,
+        destination: Path,
+        timestamp: float,
+        *,
+        max_width: int = 1024,
+    ) -> Path:
+        if timestamp < 0:
+            raise ValueError("Frame timestamp cannot be negative")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        logger.info(
+            "Extracting reference frame source=%s timestamp=%.3f destination=%s",
+            source,
+            timestamp,
+            destination,
+        )
+        self._run(
+            [
+                self.ffmpeg,
+                "-y",
+                "-ss",
+                str(timestamp),
+                "-i",
+                str(source),
+                "-frames:v",
+                "1",
+                "-vf",
+                f"scale='min({max_width},iw)':-2",
+                "-q:v",
+                "2",
+                str(destination),
+            ]
+        )
+        return destination
+
+    def create_placeholder_image(
+        self,
+        destination: Path,
+        *,
+        width: int = 1024,
+        height: int = 1536,
+        color: str = "0x1f2937",
+    ) -> Path:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        logger.info("Creating neutral placeholder image destination=%s", destination)
+        self._run(
+            [
+                self.ffmpeg,
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                f"color=c={color}:s={width}x{height}",
+                "-frames:v",
+                "1",
+                str(destination),
+            ]
+        )
+        return destination
+
     def render_clip(
         self,
         source: Path,
@@ -157,6 +218,10 @@ class FFmpeg:
                     str(total_duration),
                     "-i",
                     str(audio_source),
+                    "-map",
+                    "0:v:0",
+                    "-map",
+                    "1:a:0",
                     "-vf",
                     f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
                     f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",

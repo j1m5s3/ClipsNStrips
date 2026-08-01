@@ -16,6 +16,7 @@ def record_approval(
     reviewer: str,
     approved: bool,
     notes: str,
+    bypassed: bool = False,
 ) -> None:
     if not reviewer.strip() or not notes.strip():
         raise ValueError("Reviewer and notes are required for an auditable decision")
@@ -26,6 +27,7 @@ def record_approval(
             reviewer=reviewer,
             approved=approved,
             notes=notes,
+            bypassed=bypassed,
         )
     )
     if purpose == "rights":
@@ -46,6 +48,40 @@ def record_approval(
         job_id,
         purpose,
         approved,
+    )
+
+
+def bypass_processing_gate(
+    store: JobStore,
+    job_id: str,
+    purpose: str,
+) -> None:
+    if purpose not in {"ingest", "spans"}:
+        raise PermissionError("No-approval mode is limited to ingest and span-processing gates")
+    manifest = store.load(job_id)
+    existing = manifest.approval_for(purpose)
+    if existing and existing.approved:
+        return
+    if purpose == "spans":
+        selected = {segment.id for segment in manifest.segments if segment.approved}
+        if not selected:
+            selected = {segment.id for segment in manifest.segments}
+            if not selected:
+                raise ValueError("No candidate segments are available to bypass")
+            set_segment_approval(store, job_id, selected)
+    record_approval(
+        store,
+        job_id,
+        purpose=purpose,
+        reviewer="CLI --no-approval",
+        approved=True,
+        notes="Processing gate bypassed by explicit --no-approval flag",
+        bypassed=True,
+    )
+    logger.warning(
+        "Bypassed processing approval job_id=%s purpose=%s",
+        job_id,
+        purpose,
     )
 
 
